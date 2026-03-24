@@ -7,114 +7,164 @@ from difflib import SequenceMatcher
 from deep_translator import GoogleTranslator
 
 # --- UTILS ---
+
 SCANNING_ID_REGEX = re.compile(r"\b\d{4,10}-?\d{4}-?\d?\b")
+
 
 def normalize_id(raw_id: str) -> str:
     return re.sub(r"[^0-9]", "", raw_id)
 
+
 # --- SYSTEM SETUP ---
+
 st.set_page_config(page_title="Label Sorter Pro", layout="wide")
+st.title("📦 Label Sorter Pro")
 
-# Sidebar Language Selector
-st.sidebar.header("Settings")
-lang_options = list(TRANSLATIONS.keys())
-selected_lang = st.sidebar.selectbox("Language / Idioma", lang_options)
-T = TRANSLATIONS[selected_lang]
-
-# --- MAIN TOOL: LABEL SORTER ---
-st.title(T["title"])
+# --- MAIN UI ---
 
 col1, col2 = st.columns([1, 1])
+
 with col1:
-    st.subheader(T["step1"])
-    raw_input = st.text_area(T["step1"], placeholder=T["placeholder"], height=200, label_visibility="collapsed")
+    st.subheader("1. Enter Tracking Numbers")
+    raw_input = st.text_area(
+        "Paste IDs here",
+        placeholder="Paste IDs here (one per line):\n1234-5678-0\n9876-5432-1",
+        height=300,
+        label_visibility="collapsed"
+    )
+
 with col2:
-    st.subheader(T["step2"])
+    st.subheader("2. Upload Labels PDF")
     label_file = st.file_uploader("Upload PDF", type="pdf", label_visibility="collapsed")
 
 if label_file and raw_input:
-    if st.button(T["btn_start"], use_container_width=True):
-        # [Existing Logic: OCR, Matching, PDF Build]
+    # Parse Inputs
+    raw_targets = list(dict.fromkeys(SCANNING_ID_REGEX.findall(raw_input)))
+    target_ids = raw_targets
+    normalized_target_map = {normalize_id(t): t for t in target_ids}
+    normalized_targets = set(normalized_target_map.keys())
+
+    if st.button("🔍 Start Sorting Labels", use_container_width=True):
+        status = st.empty()
+        progress_bar = st.progress(0)
+        
         try:
-            # ... (Logic condensed for brevity, same as previous version) ...
-            # 1. Setup
-            target_ids = list(dict.fromkeys(SCANNING_ID_REGEX.findall(raw_input)))
-            normalized_target_map = {normalize_id(t): t for t in target_ids}
-            normalized_targets = set(normalized_target_map.keys())
-            
+            # Load PDF
             label_bytes = label_file.getvalue()
             images = convert_from_bytes(label_bytes, dpi=200)
             label_reader = pypdf.PdfReader(io.BytesIO(label_bytes))
+            
             sorted_writer = pypdf.PdfWriter()
-            
-            page_map, matched_ids, cand_to_page = {}, set(), {}
+            page_map = {}
+            matched_ids = set()
+            candidate_to_page = {}
 
-            # 2. Scan
-            progress = st.progress(0)
+            # 1. SCANNING PHASE
             for i, img in enumerate(images):
-                ocr_txt = pytesseract.image_to_string(img)
-                bc_txt = "".join([b.data.decode('utf-8') for b in decode(img)])
-                found = {normalize_id(x) for x in SCANNING_ID_REGEX.findall(ocr_txt + bc_txt)}
-                
-                for fid in found: cand_to_page.setdefault(fid, i)
-                for nt in normalized_targets:
-                    if nt in found:
-                        page_map[nt] = label_reader.pages[i]
-                        matched_ids.add(nt)
-                progress.progress((i+1)/len(images))
+                status.text(f"Scanning label page {i+1} of {len(images)}...")
 
-            # 3. Fuzzy Match
-            unmatched = [n for n in normalized_targets if n not in matched_ids]
-            for unm in unmatched:
-                best_c, best_s = None, 0.0
-                for cand in cand_to_page:
-                    s = SequenceMatcher(None, unm, cand).ratio()
-                    if s > best_s: best_c, best_s = cand, s
-                if best_c and best_s > 0.88:
+                # OCR & Barcode Reading
+                ocr_text_raw = pytesseract.image_to_string(img)
+                bc_text_raw = "".join([bc.data.decode('utf-8') for bc in decode(img)])
+
+                found_ids = {normalize_id(x) for x in SCANNING_ID_REGEX.findall(ocr_text_raw + bc_text_raw)}
+
+                for fid in found_ids:
+                    candidate_to_page.setdefault(fid, i)
+
+                for normalized_target in normalized_targets:
+                    if normalized_target in found_ids:
+                        page_map[normalized_target] = label_reader.pages[i]
+                        matched_ids.add(normalized_target)
+
+                progress_bar.progress((i + 1) / len(images))
+
+            # 2. FUZZY MATCHING PHASE
+            fuzzy_matches = {}
+            FUZZY_THRESHOLD = 0.88
+            unmatched_normalized = [n for n in normalized_targets if n not in matched_ids]
+            
+            for unm in unmatched_normalized:
+                best_score = 0.0
+                best_cand = None
+                for cand in candidate_to_page.keys():
+                    score = SequenceMatcher(None, unm, cand).ratio()
+                    if score > best_score:
+                        best_score = score
+                        best_cand = cand
+
+                if best_cand is not None and best_score >= FUZZY_THRESHOLD:
                     matched_ids.add(unm)
-                    page_map[unm] = label_reader.pages[cand_to_page[best_c]]
+                    page_map[unm] = label_reader.pages[candidate_to_page[best_cand]]
+                    fuzzy_matches[unm] = (best_cand, best_score)
 
-            # 4. Results
+            # 3. ASSEMBLY & RESULTS
+            final_unmatched = [normalized_target_map[n] for n in normalized_targets if n not in matched_ids]
+            
+            status.success("Processing Complete!")
             st.divider()
-            tab_yes, tab_no = st.tabs([f"{T['tab_sorted']} ({len(matched_ids)})", f"{T['tab_review']}"])
-            
-            with tab_yes:
+
+            # Results Tabs
+            tab_match, tab_miss = st.tabs([
+                f"✅ Sorted Results ({len(matched_ids)})", 
+                f"⚠️ Review Mismatches ({len(final_unmatched)})"
+            ])
+
+            with tab_match:
                 if matched_ids:
+                    # Build final PDF
                     for tid in target_ids:
-                        if normalize_id(tid) in page_map: sorted_writer.add_page(page_map[normalize_id(tid)])
-                    out_pdf = io.BytesIO()
-                    sorted_writer.write(out_pdf)
-                    st.download_button("📥 Download PDF", out_pdf.getvalue(), "SORTED.pdf", "application/pdf", type="primary")
-            
-            with tab_no:
-                missing = [normalized_target_map[n] for n in normalized_targets if n not in matched_ids]
-                if missing: st.error("Missing IDs:"); st.code("\n".join(missing))
-                else: st.success("All matched!")
+                        nid = normalize_id(tid)
+                        if nid in page_map:
+                            sorted_writer.add_page(page_map[nid])
+                    
+                    res_pdf = io.BytesIO()
+                    sorted_writer.write(res_pdf)
+                    
+                    st.download_button(
+                        label="📥 Download Sorted PDF",
+                        data=res_pdf.getvalue(),
+                        file_name="SORTED_LABELS.pdf",
+                        mime="application/pdf",
+                        type="primary"
+                    )
+                else:
+                    st.warning("No matches found.")
+
+                if fuzzy_matches:
+                    st.info(f"⚡ Fuzzy matched {len(fuzzy_matches)} IDs (threshold {int(FUZZY_THRESHOLD*100)}%):")
+                    for unm, (cand, score) in fuzzy_matches.items():
+                        st.text(f"{normalized_target_map[unm]} -> {cand}")
+
+            with tab_miss:
+                if final_unmatched:
+                    st.error("The following IDs were NOT found in the PDF:")
+                    st.code("\n".join(final_unmatched))
+                    st.caption("Tip: Check if the PDF is blurry or if these IDs have a different format.")
+                else:
+                    st.balloons()
+                    st.success("100% Match! No errors to review.")
 
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"System Error: {e}")
 
-# --- NEW FEATURE: TRANSLATOR UTILITY ---
+# --- UTILITY: QUICK TRANSLATOR ---
 st.markdown("---")
-with st.expander(T["util_title"], expanded=True):
+with st.expander("🌍 Quick Translator (Any Language -> English)", expanded=True):
     tr_col1, tr_col2 = st.columns(2)
     
     with tr_col1:
-        # Left Column: Input
-        source_text = st.text_area(T["trans_input"], height=150)
+        source_text = st.text_area("Paste foreign text here:", height=100)
     
     with tr_col2:
-        # Right Column: Output
-        st.markdown(f"**{T['trans_output']}**")
+        st.markdown("**English Translation:**")
         if source_text:
             try:
-                # Uses Google Translate backend (No API key needed)
                 translated = GoogleTranslator(source='auto', target='en').translate(source_text)
                 st.info(translated)
             except Exception as e:
                 st.warning("⚠️ Translation requires internet connection.")
-                st.caption(str(e))
         else:
-            st.caption("Waiting for text...")
+            st.caption("Waiting for input...")
 
 st.caption("<<< VINO VJ >>>")
