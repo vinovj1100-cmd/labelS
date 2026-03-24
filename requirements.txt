@@ -1,6 +1,7 @@
 streamlit
-pypdf
 pytesseract
+pypdf
 pdf2image
 pyzbar
+deep-translator
 pillow
