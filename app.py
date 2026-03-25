@@ -104,7 +104,7 @@ with tab_sort:
         if st.button("Sort PDF Labels"):
             # Existing OCR sorting logic would go here
             st.write("Scanning and sorting labels...")
-
+st.markdown("---")
 # --- 6. QUICK TRANSLATOR (FROM YOUR IMAGE) ---
 st.markdown("---")
 with st.expander("🌐 Quick Translator (Any Language -> English)", expanded=True):
