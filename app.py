@@ -223,4 +223,24 @@ with tab_sort:
                     
             except Exception as e:
                 st.error(f"Error: {e}")
+                # --- UTILITY: QUICK TRANSLATOR ---
+st.markdown("---")
+with st.expander("🌍 Quick Translator (Any Language -> English)", expanded=True):
+    tr_col1, tr_col2 = st.columns(2)
+    
+    with tr_col1:
+        source_text = st.text_area("Paste foreign text here:", height=100)
+    
+    with tr_col2:
+        st.markdown("**English Translation:**")
+        if source_text:
+            try:
+                translated = GoogleTranslator(source='auto', target='en').translate(source_text)
+                st.info(translated)
+            except Exception as e:
+                st.warning("⚠️ Translation requires internet connection.")
+        else:
+            st.caption("Waiting for input...")
+
+st.caption("<<< VINO VJ >>>")
 
