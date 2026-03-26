@@ -1,144 +1,138 @@
 import streamlit as st
 import pytesseract
 import pypdf, re, io
+import requests
+import pandas as pd
 from pdf2image import convert_from_bytes
 from pyzbar.pyzbar import decode
-from difflib import SequenceMatcher
+from deep_translator import GoogleTranslator
 
-# --- UTILS ---
-
+# --- 1. CONFIGURATION ---
+OZON_API_URL = "https://api-seller.ozon.ru"
 SCANNING_ID_REGEX = re.compile(r"\b\d{4,10}-?\d{4}-?\d?\b")
 
+st.set_page_config(page_title="Ozon Master Tool", layout="wide", page_icon="📦")
+st.title("📦 Ozon Master Tool: Status & Label Filter")
 
-def normalize_id(raw_id: str) -> str:
-    return re.sub(r"[^0-9]", "", raw_id)
+# --- 2. SIDEBAR: API SETTINGS ---
+with st.sidebar:
+    st.header("🔑 API Settings")
+    mode = st.radio("Status Provider", ["Ozon Seller API", "17Track API"])
+    
+    if mode == "Ozon Seller API":
+        ozon_client_id = st.text_input("Client ID", placeholder="123456")
+        ozon_api_key = st.text_input("API Key", type="password")
+    else:
+        seventeen_token = st.text_input("17Track Token (17token)", type="password")
+        st.markdown("[Get 17Track Token](https://api.17track.net)")
 
+    st.divider()
+    st.header("⚙️ Scanner Settings")
+    scan_dpi = st.select_slider("Scan Quality (DPI)", options=[150, 200, 300], value=200)
 
-def extract_ids_from_text(text: str) -> set:
-    return {normalize_id(x) for x in SCANNING_ID_REGEX.findall(text)}
+# --- 3. SHARED INPUT SECTION ---
+st.subheader("1. Input Your Target Tracking Numbers")
+raw_input = st.text_area("Paste your list here (one per line)", placeholder="12345678-0001-1", height=120)
+target_ids = []
+if raw_input:
+    target_ids = list(dict.fromkeys(SCANNING_ID_REGEX.findall(raw_input)))
+    st.success(f"✅ Detected {len(target_ids)} unique target IDs")
 
+# --- 4. API LOGIC FUNCTIONS ---
+def fetch_17track(ids, token):
+    headers = {"17token": token, "Content-Type": "application/json"}
+    reg_payload = [{"number": tid} for tid in ids]
+    requests.post("https://api.17track.net", json=reg_payload, headers=headers)
+    response = requests.post("https://api.17track.net", json=reg_payload, headers=headers)
+    results = []
+    if response.status_code == 200:
+        for item in response.json().get("data", {}).get("accepted", []):
+            status_code = str(item.get("track_info", {}).get("latest_status", {}).get("status", "0"))
+            status_map = {"30": "DELIVERED", "40": "CANCELLED/ISSUE"}
+            results.append({
+                "Tracking Number": item.get("number"),
+                "Status": status_map.get(status_code, "IN TRANSIT"),
+                "Last Event": item.get("track_info", {}).get("latest_status", {}).get("desc", "-")
+            })
+    return results
 
-# --- SYSTEM SETUP ---
+# --- 5. MAIN TABS ---
+tab_status, tab_match, tab_trans = st.tabs(["📊 Bulk Status", "🔍 Barcode PDF Filter", "🌐 Quick Translator"])
 
-st.set_page_config(page_title="Label Sorter Pro", layout="wide")
-st.title("📦 Label Sorter (Paste & Match)")
-
-col1, col2 = st.columns([1, 1])
-
-with col1:
-    st.subheader("1. Enter Tracking Numbers")
-    raw_input = st.text_area(
-        "Paste IDs here (one per line):",
-        placeholder="1234-5678-0\n9876-5432-1",
-        height=300
-    )
-
-with col2:
-    st.subheader("2. Upload Labels PDF")
-    label_file = st.file_uploader("Select the PDF containing the labels", type="pdf")
-
-if label_file and raw_input:
-    # Extract unique IDs from input (preserve user order, dedupe)
-    raw_targets = list(dict.fromkeys(SCANNING_ID_REGEX.findall(raw_input)))
-    target_ids = raw_targets
-    normalized_target_map = {normalize_id(t): t for t in target_ids}
-    normalized_targets = set(normalized_target_map.keys())
-
-    if st.button("🔍 Start Sorting Labels", use_container_width=True):
-        status = st.empty()
-        progress_bar = st.progress(0)
-        
-        try:
-            label_bytes = label_file.getvalue()
-            images = convert_from_bytes(label_bytes, dpi=200)
-            label_reader = pypdf.PdfReader(io.BytesIO(label_bytes))
+with tab_status:
+    if not target_ids:
+        st.info("👈 Please paste tracking numbers above first.")
+    else:
+        if st.button(f"Check Status via {mode}", type="primary"):
+            results = []
+            if mode == "Ozon Seller API" and ozon_api_key and ozon_client_id:
+                headers = {"Client-Id": ozon_client_id, "Api-Key": ozon_api_key, "Content-Type": "application/json"}
+                payload = {"filter": {"posting_number": target_ids}, "limit": 100}
+                res = requests.post(OZON_API_URL, json=payload, headers=headers)
+                if res.status_code == 200:
+                    for p in res.json().get('result', {}).get('postings', []):
+                        reason = "-"
+                        if p.get('status') == 'cancelled':
+                            c = p.get('cancellation', {})
+                            reason = f"{c.get('cancellation_initiator')}: {c.get('cancellation_type')}"
+                        results.append({"Tracking Number": p.get('posting_number'), "Status": p.get('status').upper(), "Details": reason})
+            elif mode == "17Track API" and seventeen_token:
+                results = fetch_17track(target_ids, seventeen_token)
             
-            sorted_writer = pypdf.PdfWriter()
-            page_map = {}
-            matched_ids = set()  # normalized IDs found
-            candidate_to_page = {}
+            if results:
+                df = pd.DataFrame(results)
+                st.dataframe(df.style.apply(lambda x: ['background-color: #ffcccc' if v in ['CANCELLED', 'CANCELLED/ISSUE'] else '' for v in x], axis=1), use_container_width=True)
+                st.download_button("📥 Download Status CSV", df.to_csv(index=False), "status_report.csv", "text/csv")
 
-            for i, img in enumerate(images):
-                status.text(f"Scanning label page {i+1} of {len(images)}...")
-
-                # Extract text and barcodes
-                ocr_text_raw = pytesseract.image_to_string(img)
-                bc_text_raw = "".join([bc.data.decode('utf-8') for bc in decode(img)])
-
-                ocr_ids = extract_ids_from_text(ocr_text_raw)
-                bc_ids = extract_ids_from_text(bc_text_raw)
-                found_ids = ocr_ids.union(bc_ids)
-
-                for fid in found_ids:
-                    candidate_to_page.setdefault(fid, i)
-
-                for normalized_target in normalized_targets:
-                    if normalized_target in found_ids:
-                        page_map[normalized_target] = label_reader.pages[i]
-                        matched_ids.add(normalized_target)
-                        # We don't break here in case one page has multiple IDs
-
-                progress_bar.progress((i + 1) / len(images))
-
-            # --- RESULTS SECTION ---
-            st.divider()
-
-            # Fuzzy match unmatched IDs if an OCR candidate is close
-            fuzzy_matches = {}
-            FUZZY_THRESHOLD = 0.88
-
-            unmatched_normalized = [n for n in normalized_targets if n not in matched_ids]
-            for unm in unmatched_normalized:
-                best_score = 0.0
-                best_cand = None
-                for cand in candidate_to_page.keys():
-                    score = SequenceMatcher(None, unm, cand).ratio()
-                    if score > best_score:
-                        best_score = score
-                        best_cand = cand
-
-                if best_cand is not None and best_score >= FUZZY_THRESHOLD:
-                    matched_ids.add(unm)
-                    page_map[unm] = label_reader.pages[candidate_to_page[best_cand]]
-                    fuzzy_matches[unm] = (best_cand, best_score)
-
-            unmatched_normalized = [n for n in normalized_targets if n not in matched_ids]
-            unmatched_ids = [normalized_target_map[n] for n in [normalize_id(t) for t in target_ids] if n in unmatched_normalized]
-
-            if matched_ids:
-                # Build the PDF in the exact order of the pasted list
-                for tid in target_ids:
-                    normalized_tid = normalize_id(tid)
-                    if normalized_tid in page_map:
-                        sorted_writer.add_page(page_map[normalized_tid])
-
-                res_pdf = io.BytesIO()
-                sorted_writer.write(res_pdf)
+with tab_match:
+    st.markdown("### 📄 Filter PDF (Keep Only Matches)")
+    label_file = st.file_uploader("Upload Labels PDF", type="pdf")
+    
+    if label_file and target_ids:
+        if st.button("🔍 Scan & Generate Matched PDF", type="primary"):
+            with st.spinner("Scanning barcodes and filtering pages..."):
+                pdf_reader = pypdf.PdfReader(io.BytesIO(label_file.getvalue()))
+                pdf_writer = pypdf.PdfWriter()
+                images = convert_from_bytes(label_file.getvalue(), dpi=scan_dpi)
                 
-                st.success(f"✅ Matched {len(matched_ids)} / {len(target_ids)} labels!")
-                st.download_button(
-                    "📥 Download Sorted PDF",
-                    data=res_pdf.getvalue(),
-                    file_name="SORTED_LABELS.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-            
-            # --- FUZZY MATCH REPORT ---
-            if fuzzy_matches:
-                st.info(f"⚡ Fuzzy matched {len(fuzzy_matches)} unmatched IDs (threshold {int(FUZZY_THRESHOLD*100)}%):")
-                fuzzy_lines = [f"{normalized_target_map[unm]} -> {cand} ({score:.2f})" for unm, (cand, score) in fuzzy_matches.items()]
-                st.code("\n".join(fuzzy_lines))
+                matched_ids = []
+                for i, img in enumerate(images):
+                    page_ids = []
+                    # Scan Barcodes
+                    barcodes = decode(img)
+                    for b in barcodes:
+                        page_ids.extend(SCANNING_ID_REGEX.findall(b.data.decode("utf-8")))
+                    # OCR Backup
+                    if not barcodes:
+                        page_ids.extend(SCANNING_ID_REGEX.findall(pytesseract.image_to_string(img)))
+                    
+                    # Logic: If any ID on this page is in target_ids, keep the page
+                    if any(tid in target_ids for tid in page_ids):
+                        pdf_writer.add_page(pdf_reader.pages[i])
+                        matched_ids.extend([tid for tid in page_ids if tid in target_ids])
 
-            # --- UNMATCHED IDS DISPLAY ---
-            if unmatched_ids:
-                st.error(f"❌ {len(unmatched_ids)} IDs were NOT found:")
-                # Display unmatched IDs in a code block for easy copying
-                st.code("\n".join(unmatched_ids))
-                st.warning("Tip: These might be blurry in the PDF or use a different ID format.")
+                matched_ids = list(set(matched_ids))
+                missing = [tid for tid in target_ids if tid not in matched_ids]
 
-        except Exception as e:
-            st.error(f"Error: {e}")
+                if not pdf_writer.pages:
+                    st.error("No matches found between the PDF and your list.")
+                else:
+                    # Create downloadable PDF
+                    out_io = io.BytesIO()
+                    pdf_writer.write(out_io)
+                    st.success(f"✅ Created PDF with {len(pdf_writer.pages)} matched labels.")
+                    st.download_button("📥 Download MATCHED_LABELS.pdf", out_io.getvalue(), "matched_labels.pdf", "application/pdf")
+                    
+                    c1, c2 = st.columns(2)
+                    with c1: st.info(f"**Matched IDs:** {', '.join(matched_ids)}")
+                    with c2: 
+                        if missing: st.warning(f"**Missing from PDF:** {', '.join(missing)}")
 
-st.divider()
-st.caption("<<< VINO VJ >>>")
+with tab_trans:
+    st.markdown("### 🌐 Quick Translator")
+    source_text = st.text_area("Paste text (e.g., Russian) to translate to English:", height=100)
+    if source_text:
+        translated = GoogleTranslator(source='auto', target='en').translate(source_text)
+        st.success(f"**Translation:** {translated}")
+
+st.caption("<<< VINO VJ - 17Track, Barcode Filter & Translator Integrated >>>")
