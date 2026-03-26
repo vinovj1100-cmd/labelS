@@ -12,7 +12,7 @@ OZON_API_URL = "https://api-seller.ozon.ru"
 SCANNING_ID_REGEX = re.compile(r"\b\d{4,10}-?\d{4}-?\d?\b")
 
 st.set_page_config(page_title="Ozon Master Tool", layout="wide", page_icon="📦")
-st.title("📦 Ozon Master Tool: Status & Label Filter")
+st.title("📦 Ozon Master Tool: Status & Auto-Sorted Labels")
 
 # --- 2. SIDEBAR: API SETTINGS ---
 with st.sidebar:
@@ -32,11 +32,13 @@ with st.sidebar:
 
 # --- 3. SHARED INPUT SECTION ---
 st.subheader("1. Input Your Target Tracking Numbers")
-raw_input = st.text_area("Paste your list here (one per line)", placeholder="12345678-0001-1", height=120)
+raw_input = st.text_area("Paste your list here in the ORDER you want to print", placeholder="12345678-0001-1", height=150)
 target_ids = []
 if raw_input:
-    target_ids = list(dict.fromkeys(SCANNING_ID_REGEX.findall(raw_input)))
-    st.success(f"✅ Detected {len(target_ids)} unique target IDs")
+    # Maintain order from the text area while removing duplicates
+    seen = set()
+    target_ids = [x for x in SCANNING_ID_REGEX.findall(raw_input) if not (x in seen or seen.add(x))]
+    st.success(f"✅ Detected {len(target_ids)} unique target IDs in sequence")
 
 # --- 4. API LOGIC FUNCTIONS ---
 def fetch_17track(ids, token):
@@ -57,7 +59,7 @@ def fetch_17track(ids, token):
     return results
 
 # --- 5. MAIN TABS ---
-tab_status, tab_match, tab_trans = st.tabs(["📊 Bulk Status", "🔍 Barcode PDF Filter", "🌐 Quick Translator"])
+tab_status, tab_match, tab_trans = st.tabs(["📊 Bulk Status", "🔍 Auto-Sorted PDF Filter", "🌐 Quick Translator"])
 
 with tab_status:
     if not target_ids:
@@ -85,54 +87,58 @@ with tab_status:
                 st.download_button("📥 Download Status CSV", df.to_csv(index=False), "status_report.csv", "text/csv")
 
 with tab_match:
-    st.markdown("### 📄 Filter PDF (Keep Only Matches)")
-    label_file = st.file_uploader("Upload Labels PDF", type="pdf")
+    st.markdown("### 📄 Filter & Auto-Sort PDF")
+    label_file = st.file_uploader("Upload Labels PDF (Bulk)", type="pdf")
     
     if label_file and target_ids:
-        if st.button("🔍 Scan & Generate Matched PDF", type="primary"):
-            with st.spinner("Scanning barcodes and filtering pages..."):
+        if st.button("🔍 Scan, Sort & Generate PDF", type="primary"):
+            with st.spinner("Mapping PDF pages and re-ordering..."):
                 pdf_reader = pypdf.PdfReader(io.BytesIO(label_file.getvalue()))
                 pdf_writer = pypdf.PdfWriter()
                 images = convert_from_bytes(label_file.getvalue(), dpi=scan_dpi)
                 
-                matched_ids = []
+                # Map Tracking_ID to the actual PDF page object
+                id_to_page_map = {}
+                
                 for i, img in enumerate(images):
-                    page_ids = []
-                    # Scan Barcodes
+                    page_codes = []
+                    # Try Barcode Decode
                     barcodes = decode(img)
                     for b in barcodes:
-                        page_ids.extend(SCANNING_ID_REGEX.findall(b.data.decode("utf-8")))
-                    # OCR Backup
+                        page_codes.extend(SCANNING_ID_REGEX.findall(b.data.decode("utf-8")))
+                    # OCR Fallback
                     if not barcodes:
-                        page_ids.extend(SCANNING_ID_REGEX.findall(pytesseract.image_to_string(img)))
+                        page_codes.extend(SCANNING_ID_REGEX.findall(pytesseract.image_to_string(img)))
                     
-                    # Logic: If any ID on this page is in target_ids, keep the page
-                    if any(tid in target_ids for tid in page_ids):
-                        pdf_writer.add_page(pdf_reader.pages[i])
-                        matched_ids.extend([tid for tid in page_ids if tid in target_ids])
+                    # Store mapping
+                    for code in page_codes:
+                        id_to_page_map[code] = pdf_reader.pages[i]
 
-                matched_ids = list(set(matched_ids))
-                missing = [tid for tid in target_ids if tid not in matched_ids]
+                # Re-build PDF in the sequence of 'target_ids'
+                matched_count = 0
+                for tid in target_ids:
+                    if tid in id_to_page_map:
+                        pdf_writer.add_page(id_to_page_map[tid])
+                        matched_count += 1
 
-                if not pdf_writer.pages:
-                    st.error("No matches found between the PDF and your list.")
+                if matched_count == 0:
+                    st.error("No matches found. Ensure IDs in the PDF match your pasted list.")
                 else:
-                    # Create downloadable PDF
                     out_io = io.BytesIO()
                     pdf_writer.write(out_io)
-                    st.success(f"✅ Created PDF with {len(pdf_writer.pages)} matched labels.")
-                    st.download_button("📥 Download MATCHED_LABELS.pdf", out_io.getvalue(), "matched_labels.pdf", "application/pdf")
+                    st.success(f"✅ Created PDF with {matched_count} pages sorted exactly like your list.")
+                    st.download_button("📥 Download SORTED_LABELS.pdf", out_io.getvalue(), "sorted_labels.pdf", "application/pdf")
                     
-                    c1, c2 = st.columns(2)
-                    with c1: st.info(f"**Matched IDs:** {', '.join(matched_ids)}")
-                    with c2: 
-                        if missing: st.warning(f"**Missing from PDF:** {', '.join(missing)}")
+                    # Show Mismatches
+                    missing = [tid for tid in target_ids if tid not in id_to_page_map]
+                    if missing:
+                        st.warning(f"**Missing from PDF ({len(missing)}):** {', '.join(missing)}")
 
 with tab_trans:
     st.markdown("### 🌐 Quick Translator")
-    source_text = st.text_area("Paste text (e.g., Russian) to translate to English:", height=100)
+    source_text = st.text_area("Paste text (e.g., Russian) to translate:", height=100)
     if source_text:
         translated = GoogleTranslator(source='auto', target='en').translate(source_text)
         st.success(f"**Translation:** {translated}")
 
-st.caption("<<< VINO VJ - 17Track, Barcode Filter & Translator Integrated >>>")
+st.caption("<<< VINO VJ - Auto-Sort Sequence Active >>>")
