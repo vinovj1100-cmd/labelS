@@ -8,121 +8,205 @@ from pyzbar.pyzbar import decode
 from deep_translator import GoogleTranslator
 
 # --- 1. CONFIGURATION & REGEX ---
-OZON_API_URL = "https://api-seller.ozon.ru"
-SCANNING_ID_REGEX = re.compile(r"\b\d{4,10}-?\d{4}-?\d?\b")
+# Specifically tuned for Ozon Posting Numbers: 12345678-0001-1
+SCANNING_ID_REGEX = re.compile(r"\b\d{4,12}-?\d{4}-?\d?\b")
 
 st.set_page_config(page_title="Ozon Master Tool Pro", layout="wide", page_icon="📦")
 
-# --- 2. SIDEBAR ---
-with st.sidebar:
-    st.header("🔑 API Settings")
-    mode = st.radio("Status Provider", ["Ozon Seller API", "17Track API"])
-    st.divider()
-    st.header("⚙️ OCR Settings")
-    scan_dpi = st.select_slider("Scan Quality (DPI)", options=[150, 200, 300], value=200)
-    st.info("💡 Note: 300 DPI is best for small barcodes.")
+# Professional UI Styling
+st.markdown("""
+    <style>
+    .main { background-color: #f8f9fa; }
+    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #e1e4e8; }
+    div[data-testid="stExpander"] { background-color: #ffffff; border-radius: 10px; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- 3. LOGIC FUNCTIONS ---
-def robust_parse(text_data):
+# --- 2. LOGIC ENGINES ---
+
+def robust_parse_ozon_multiline(text_data):
+    """
+    Groups multi-line product descriptions with their tracking numbers.
+    Perfect for data pasted directly from Ozon Seller tables.
+    """
     data_map = {}
-    splitter = re.compile(r'[,\t|]|\s{2,}')
-    for line in text_data.strip().split('\n'):
+    current_tn = None
+    lines = text_data.strip().split('\n')
+    
+    for line in lines:
         line = line.strip()
         if not line: continue
-        parts = [p.strip() for p in splitter.split(line) if p.strip()]
-        if len(parts) >= 2:
-            tn = parts[0]
-            pids = set(p.upper() for p in parts[1:])
-            data_map.setdefault(tn, set()).update(pids)
+        
+        # Search for a Tracking Number in the line
+        tn_match = SCANNING_ID_REGEX.search(line)
+        
+        if tn_match:
+            current_tn = tn_match.group()
+            # Remove the ID from the line to get any same-line description
+            product_desc = line.replace(current_tn, "").strip().strip('|').strip()
+            data_map.setdefault(current_tn, set())
+            if product_desc:
+                data_map[current_tn].add(product_desc)
+        elif current_tn:
+            # Add line as a description to the current active Tracking Number
+            data_map[current_tn].add(line)
+            
     return data_map
 
-# --- 4. MAIN TABS ---
-tab_status, tab_match, tab_audit, tab_trans = st.tabs([
-    "📊 Bulk Status", 
-    "🔍 PDF Filter/Sort", 
-    "⚖️ Verification Auditor", 
-    "🌐 Translator"
-])
+# --- 3. SIDEBAR: GLOBAL SETTINGS ---
+
+with st.sidebar:
+    st.image("https://icons8.com", width=80)
+    st.title("Settings")
+    
+    st.subheader("🛰 API Provider")
+    api_mode = st.radio("Provider", ["Ozon Seller API", "17Track API"])
+    
+    st.divider()
+    
+    st.subheader("📷 PDF Scanner")
+    scan_dpi = st.select_slider("Resolution (DPI)", options=[150, 200, 300], value=200, 
+                                help="300 is slowest but most accurate for small barcodes.")
+    
+    st.divider()
+    st.caption("v5.5 Build | Ozon Auditor Engine")
+
+# --- 4. MAIN INTERFACE ---
+
+st.title("📦 Ozon Master Tool Pro")
+tabs = st.tabs(["📊 Bulk Status", "🔍 PDF Filter/Sort", "⚖️ Verification Auditor", "🌐 Translator"])
 
 # --- TAB 1: BULK STATUS ---
-with tab_status:
-    st.subheader("1. Tracking Status Checker")
-    raw_status_input = st.text_area("Paste Tracking Numbers for Status Check", height=150)
-    status_target_ids = SCANNING_ID_REGEX.findall(raw_status_input)
-    if st.button("Check API Status"):
-        st.info("API logic connected...")
+with tabs[0]:
+    st.subheader("1. Real-time Tracking Status")
+    status_input = st.text_area("Paste Tracking Numbers here", height=150, placeholder="Example: 81252745-0077-1")
+    if st.button("Check Status", type="primary"):
+        target_ids = SCANNING_ID_REGEX.findall(status_input)
+        if target_ids:
+            st.info(f"Connecting to {api_mode} for {len(set(target_ids))} items...")
+        else:
+            st.error("No valid Tracking Numbers detected.")
 
-# --- TAB 2: PDF FILTER & SORT (FIXED PASTE & LOGIC) ---
-with tab_match:
-    st.subheader("2. PDF Auto-Sort & Filter")
+# --- TAB 2: PDF FILTER & SORT ---
+with tabs[1]:
+    st.subheader("2. Smart PDF Label Sequencer")
+    col_a, col_b = st.columns([1, 2])
     
-    # NEW: Dedicated input box for this tab
-    sort_input = st.text_area("Paste Tracking Numbers in the order you want them printed", 
-                               placeholder="12345678-0001-1\n12345678-0002-1", 
-                               height=150, key="sort_paster")
-    
-    sort_target_ids = SCANNING_ID_REGEX.findall(sort_input)
-    label_file = st.file_uploader("Upload Bulk Labels PDF", type="pdf")
-
-    if label_file and sort_target_ids:
-        if st.button("🚀 Start Scan & Sort Labels", type="primary"):
-            with st.spinner("Scanning PDF pages... this may take a minute."):
-                pdf_reader = pypdf.PdfReader(io.BytesIO(label_file.getvalue()))
-                pdf_writer = pypdf.PdfWriter()
-                
-                # Convert PDF to images for Barcode/OCR scanning
-                images = convert_from_bytes(label_file.getvalue(), dpi=scan_dpi)
-                id_to_page_map = {}
-
-                for i, img in enumerate(images):
-                    page_codes = []
-                    # Try Barcode first
-                    barcodes = decode(img)
-                    for b in barcodes:
-                        page_codes.extend(SCANNING_ID_REGEX.findall(b.data.decode("utf-8")))
+    with col_a:
+        sort_input = st.text_area("Order List (Pasted Tracking IDs)", height=300, 
+                                  placeholder="Paste the sequence you want to print...")
+    with col_b:
+        label_file = st.file_uploader("Upload Bulk PDF Labels", type="pdf")
+        
+    if label_file and sort_input:
+        if st.button("🚀 Start Sequence Sorting"):
+            target_ids = SCANNING_ID_REGEX.findall(sort_input)
+            with st.spinner("Scanning and Re-ordering PDF..."):
+                try:
+                    pdf_reader = pypdf.PdfReader(io.BytesIO(label_file.getvalue()))
+                    pdf_writer = pypdf.PdfWriter()
+                    images = convert_from_bytes(label_file.getvalue(), dpi=scan_dpi)
                     
-                    # OCR Fallback if barcode fails
-                    if not barcodes:
-                        page_codes.extend(SCANNING_ID_REGEX.findall(pytesseract.image_to_string(img)))
-                    
-                    # Link found ID to this page index
-                    for code in page_codes:
-                        id_to_page_map[code] = pdf_reader.pages[i]
+                    id_to_page_map = {}
+                    for i, img in enumerate(images):
+                        # Detect Barcodes
+                        found = [b.data.decode("utf-8") for b in decode(img)]
+                        # Fallback to OCR
+                        if not found:
+                            found = SCANNING_ID_REGEX.findall(pytesseract.image_to_string(img))
+                        
+                        for code in found:
+                            # Clean code to match input format
+                            clean_code = SCANNING_ID_REGEX.search(code)
+                            if clean_code:
+                                id_to_page_map[clean_code.group()] = pdf_reader.pages[i]
 
-                # Re-build PDF using the sequence of the pasted list
-                matched_count = 0
-                for tid in sort_target_ids:
-                    if tid in id_to_page_map:
-                        pdf_writer.add_page(id_to_page_map[tid])
-                        matched_count += 1
-
-                if matched_count > 0:
-                    out_io = io.BytesIO()
-                    pdf_writer.write(out_io)
-                    st.success(f"✅ Successfully sorted {matched_count} labels!")
-                    st.download_button("📥 Download SORTED_LABELS.pdf", out_io.getvalue(), "sorted_labels.pdf")
+                    # Rebuild PDF in Order
+                    matched = 0
+                    for tid in target_ids:
+                        if tid in id_to_page_map:
+                            pdf_writer.add_page(id_to_page_map[tid])
+                            matched += 1
                     
-                    # Show Mismatches
-                    missing = [tid for tid in sort_target_ids if tid not in id_to_page_map]
-                    if missing:
-                        st.warning(f"⚠️ {len(missing)} IDs not found in PDF: {', '.join(missing)}")
-                else:
-                    st.error("No matches found. Ensure the IDs in the PDF match your list.")
+                    if matched > 0:
+                        out = io.BytesIO()
+                        pdf_writer.write(out)
+                        st.success(f"✅ Created sorted PDF with {matched} pages.")
+                        st.download_button("📥 Download Sorted PDF", out.getvalue(), "sorted_labels.pdf")
+                    else:
+                        st.error("Could not find any matching labels in the PDF.")
+                except Exception as e:
+                    st.error(f"Error processing PDF: {e}")
 
 # --- TAB 3: VERIFICATION AUDITOR ---
-with tab_audit:
-    st.subheader("⚖️ Logistics Auditor")
-    col1, col2 = st.columns(2)
-    with col1:
-        master_data = st.text_area("Master Data (Expected)", height=250)
-    with col2:
-        scan_data = st.text_area("Scanned Data (Actual)", height=250)
-    # Verification logic remains as per previous script...
+with tabs[2]:
+    st.subheader("3. Verification Auditor (Master vs Scan)")
+    st.write("Ensures the correct products are being packed for each order.")
+    
+    col_left, col_right = st.columns(2)
+    with col_left:
+        master_raw = st.text_area("MASTER DATA (Expected)", height=300, key="m_audit")
+    with col_right:
+        scan_raw = st.text_area("SCANNED DATA (Actual)", height=300, key="s_audit")
 
-# --- TAB 4: TRANSLATOR ---
-with tab_trans:
-    st.subheader("🌐 Translator")
-    source_text = st.text_area("Paste Russian Text", height=100)
-    if source_text:
-        translated = GoogleTranslator(source='auto', target='en').translate(source_text)
-        st.success(f"Translation: {translated}")
+    if st.button("⚡ Run Discrepancy Analysis", type="primary"):
+        if master_raw and scan_raw:
+            master_map = robust_parse_ozon_multiline(master_raw)
+            scan_map = robust_parse_ozon_multiline(scan_raw)
+            
+            all_ids = sorted(list(set(master_map.keys()) | set(scan_map.keys())))
+            results = []
+            
+            for tid in all_ids:
+                exp = master_map.get(tid, set())
+                got = scan_map.get(tid, set())
+                
+                # Check for Match
+                status = "✅ MATCH" if exp == got else "❌ ERROR"
+                missing = exp - got
+                extra = got - exp
+                
+                results.append({
+                    "Tracking ID": tid,
+                    "Status": status,
+                    "Missing Items": " | ".join(missing) if missing else "-",
+                    "Extra Items": " | ".join(extra) if extra else "-",
+                    "Total Exp": len(exp),
+                    "Total Got": len(got)
+                })
+            
+            # --- Results Presentation ---
+            df = pd.DataFrame(results)
+            err_count = len(df[df["Status"] == "❌ ERROR"])
+            
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Orders Checked", len(all_ids))
+            m2.metric("Perfect Matches", len(all_ids) - err_count)
+            m3.metric("Errors Found", err_count, delta=-err_count, delta_color="inverse")
+            
+            # Search Tool
+            search = st.text_input("🔍 Search Tracking ID in Results")
+            if search:
+                df = df[df["Tracking ID"].str.contains(search)]
+                
+            st.dataframe(df.style.apply(lambda x: ['background-color: #ffcccc' if v == "❌ ERROR" else '' for v in x], axis=1, subset=["Status"]), use_container_width=True)
+            
+            # Export Errors
+            if err_count > 0:
+                errors_only = df[df["Status"] == "❌ ERROR"]
+                st.download_button("📥 Download Error Report (CSV)", errors_only.to_csv(index=False), "audit_errors.csv")
+        else:
+            st.warning("Please paste data into both Master and Scan fields.")
+
+# --- TAB 4: QUICK TRANSLATOR ---
+with tabs[3]:
+    st.subheader("4. Logistic Content Translator")
+    input_text = st.text_area("Paste Russian descriptions to translate", height=150)
+    if input_text:
+        with st.spinner("Translating..."):
+            translated = GoogleTranslator(source='auto', target='en').translate(input_text)
+            st.success("English Translation:")
+            st.write(translated)
+
+st.divider()
+st.caption("Ozon Auditor v5.5 | Pro Warehouse Logistics Suite")
