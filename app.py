@@ -71,7 +71,7 @@ with st.sidebar:
 
 # --- 4. MAIN INTERFACE ---
 
-st.title("📦 Ozon Master Tool Pro")
+st.title("📦 FULFILLMENT YESI ")
 tabs = st.tabs(["📊 Bulk Status", "🔍 PDF Filter/Sort", "⚖️ Verification Auditor", "🌐 Translator"])
 
 # --- TAB 1: BULK STATUS ---
@@ -194,4 +194,4 @@ with tabs[3]:
             st.markdown(f"**{translated}**")
 
 st.divider()
-st.caption("**Ozon Auditor v5.6** | **300 DPI Precision Active**")
+st.caption("**FULFILLMENT - YESI**")
