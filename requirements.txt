@@ -1,13 +1,20 @@
-streamlit 
-pytesseract
-pypdf
-requests
+# Web Framework
+streamlit
+
+# Data Processing & Excel
 pandas
-json
-hashlib
+openpyxl
+
+# PDF Processing & Generation
+pypdf
 pdf2image
+reportlab
+
+# OCR & Barcode Scanning
+pytesseract
 pyzbar
+
+# Translation & Security
 deep-translator
-base64
-Fernet
-logging
+cryptography
+requests
