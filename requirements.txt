@@ -1,8 +1,13 @@
-streamlit
+streamlit 
+pytesseract
+pypdf
 requests
 pandas
-pytesseract
+json
+hashlib
 pdf2image
 pyzbar
 deep-translator
-pypdf
+base64
+Fernet
+logging
