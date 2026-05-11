@@ -288,12 +288,11 @@ with st.sidebar:
     ozon_key = st.text_input("API Key", type="password")
     
     st.divider()
-    st.subheader("📷 Scanner")
-    scan_dpi = st.select_slider("Resolution (DPI)", options=[150, 200, 300], value=300)
+    st.subheader("📷 Default Scanner Setup")
+    sidebar_scan_dpi = st.select_slider("Global Resolution (DPI)", options=[150, 200, 300], value=300, key="sidebar_dpi")
     
     st.divider()
     st.subheader("💾 Export Settings")
-    # Use canonical export options
     default_export_format = st.selectbox("Default Export Format", EXPORT_FORMAT_OPTIONS, index=0)
     
     st.divider()
@@ -339,48 +338,110 @@ with tabs[0]:
     with col2:
         if st.button("📋 Copy Session Info"):
             session_info = f"Session: {st.session_state.session_hash}\nOperator: {operator_name}\nTime: {datetime.now()}"
-            st.info(session_info) # Workaround since clipboard_copy isn't natively supported on all Streamlit environments
+            st.info(session_info)
 
-# --- TAB 2: PDF SORT ---
+# --- TAB 2: PDF SORT (PRO LEVEL) ---
 with tabs[1]:
-    st.subheader("🔍 **PDF Label Sequencer (300 DPI)**")
+    st.subheader("🔍 **Pro PDF Label Sequencer**")
+    st.markdown("Upload a bulk PDF of unsorted shipping labels and paste your required sequence. The system will scan, map, and generate a new PDF sorted exactly to your specifications.")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns([1, 2])
     with col1:
-        sort_list = st.text_area("Sequence Order", height=250, placeholder="Enter sequence (one per line)")
+        sort_list = st.text_area("🎯 Target Sequence Order", height=300, placeholder="Paste Tracking IDs here (one per line)...")
     with col2:
-        pdf_file = st.file_uploader("Upload Labels PDF", type="pdf", help="Supports up to 10MB")
-    with col3:
-        scan_dpi = st.select_slider("DPI Settings", options=[150, 200, 300], value=300)
-    
-    if st.button("🚀 Start Sequence Sort"):
-        if not sort_list.strip() and not pdf_file:
-            st.warning("Please provide sequence data or upload PDF.")
+        label_file = st.file_uploader("📄 Upload Labels PDF (Bulk)", type="pdf", help="Supports multi-page PDFs")
         
-        if pdf_file:
-            with st.spinner("Processing PDF..."):
-                pdf_bytes = pdf_file.read()
-                extracted_text = extract_text_from_pdf(pdf_bytes)
-                barcode_data = parse_barcode_from_pdf(pdf_bytes)
-                
-                if extracted_text:
-                    st.success("✅ Text extracted successfully!")
-                    st.text(extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text)
-                
-                if barcode_data:
-                    st.success("✅ Barcodes detected!")
-                    st.dataframe(pd.DataFrame(barcode_data))
+        with st.expander("⚙️ PDF Scanner Settings"):
+            scan_dpi = st.select_slider("Resolution (DPI)", options=[150, 200, 300], value=200, key="tab2_dpi", help="Higher DPI improves accuracy but slows down processing.")
+            use_ocr = st.checkbox("Enable OCR Fallback", value=True, help="Use Tesseract OCR if barcode decoding fails.")
+
+    if st.button("🚀 Scan, Sort & Generate PDF", type="primary", use_container_width=True):
+        # Clean up target IDs from the text area
+        target_ids = [tid.strip() for tid in sort_list.split('\n') if tid.strip()]
         
-    if st.button("📄 Generate Sample PDF"):
-        sequence_data = [f"Item_{i+1}: Tracking_{i+1:04d}-ABC" for i in range(5)]
-        pdf_content = generate_sequence_pdf(sequence_data)
-        if pdf_content:
-            st.download_button(
-                label="Download Sample PDF",
-                data=pdf_content,
-                file_name="sample_sequence.pdf",
-                mime="application/pdf"
-            )
+        if not target_ids:
+            st.warning("⚠️ Please provide at least one Tracking ID in the sequence order.")
+        elif not label_file:
+            st.warning("⚠️ Please upload a PDF file to process.")
+        else:
+            with st.spinner("Mapping PDF pages and re-ordering... This may take a moment."):
+                try:
+                    # Initialize PDF objects
+                    pdf_reader = pypdf.PdfReader(io.BytesIO(label_file.getvalue()))
+                    pdf_writer = pypdf.PdfWriter()
+                    
+                    # Convert PDF to images for scanning
+                    images = convert_from_bytes(label_file.getvalue(), dpi=scan_dpi)
+                    
+                    id_to_page_map = {}
+                    progress_bar = st.progress(0, text="Scanning pages...")
+                    
+                    # Scan each page
+                    for i, img in enumerate(images):
+                        page_codes = []
+                        
+                        # 1. Try Barcode Decode
+                        barcodes = decode(img)
+                        for b in barcodes:
+                            decoded_data = b.data.decode("utf-8")
+                            page_codes.extend(SCANNING_ID_REGEX.findall(decoded_data))
+                        
+                        # 2. OCR Fallback (if enabled and no barcodes found)
+                        if not barcodes and use_ocr:
+                            ocr_text = pytesseract.image_to_string(img)
+                            page_codes.extend(SCANNING_ID_REGEX.findall(ocr_text))
+                        
+                        # Map found codes to the original PDF page
+                        for code in set(page_codes): # Use set to avoid duplicate mappings per page
+                            id_to_page_map[code] = pdf_reader.pages[i]
+                            
+                        # Update progress bar
+                        progress_bar.progress((i + 1) / len(images), text=f"Scanned page {i+1} of {len(images)}")
+
+                    # Clear progress bar
+                    progress_bar.empty()
+
+                    # Re-build PDF in the sequence of 'target_ids'
+                    matched_count = 0
+                    for tid in target_ids:
+                        # Extract clean ID in case user pasted extra text alongside the tracking number
+                        clean_tid_match = SCANNING_ID_REGEX.search(tid)
+                        search_key = clean_tid_match.group() if clean_tid_match else tid
+
+                        if search_key in id_to_page_map:
+                            pdf_writer.add_page(id_to_page_map[search_key])
+                            matched_count += 1
+
+                    # Results Output
+                    st.divider()
+                    if matched_count == 0:
+                        st.error("❌ No matches found. Ensure the Tracking IDs in your list match the barcodes/text in the PDF.")
+                    else:
+                        out_io = io.BytesIO()
+                        pdf_writer.write(out_io)
+                        
+                        # Display Metrics
+                        col_metrics1, col_metrics2, col_metrics3 = st.columns(3)
+                        col_metrics1.metric("Requested Sequence", len(target_ids))
+                        col_metrics2.metric("Successfully Mapped", matched_count)
+                        col_metrics3.metric("Missing Pages", len(target_ids) - matched_count)
+                        
+                        st.success(f"✅ Successfully created a new PDF with {matched_count} pages sorted exactly to your list!")
+                        st.download_button(
+                            label="📥 Download SORTED_LABELS.pdf", 
+                            data=out_io.getvalue(), 
+                            file_name=f"sorted_labels_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf", 
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+                        
+                        # Show Mismatches
+                        missing = [tid for tid in target_ids if (SCANNING_ID_REGEX.search(tid).group() if SCANNING_ID_REGEX.search(tid) else tid) not in id_to_page_map]
+                        if missing:
+                            st.warning(f"⚠️ **Missing from PDF ({len(missing)}):**\n" + "\n".join([f"• {m}" for m in missing]))
+                            
+                except Exception as e:
+                    st.error(f"❌ An error occurred during processing: {str(e)}")
 
 # --- TAB 3: AUDITOR ---
 with tabs[2]:
@@ -579,7 +640,7 @@ with tabs[4]:
                 'client_id': ozon_id.replace('*', 'X') if ozon_id else '',
                 'api_key': ozon_key.replace('*', 'X') if ozon_key else ''
             },
-            'scanner_settings': {'dpi': scan_dpi},
+            'scanner_settings': {'sidebar_dpi': sidebar_scan_dpi},
             'export_settings': {'default_format': default_export_format}
         }
 
