@@ -638,10 +638,17 @@ if check_password():
                 'export_settings': {'default_format': default_export_format}
             }
 
-            st.json(settings)
+            # Create a redacted copy to avoid leaking credentials
+            redacted_settings = dict(settings)
+            redacted_settings['api_credentials'] = {
+                'client_id': "REDACTED" if ozon_id else '',
+                'api_key': "REDACTED" if ozon_key else ''
+            }
+
+            st.json(redacted_settings)
 
             if st.button("📥 Download Settings"):
-                settings_json = json.dumps(settings, indent=2)
+                settings_json = json.dumps(redacted_settings, indent=2)
                 st.download_button(
                     label="Download Settings",
                     data=settings_json,
