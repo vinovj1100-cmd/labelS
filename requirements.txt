@@ -1,8 +1,20 @@
+# Web Framework
 streamlit
-requests
+
+# Data Processing & Excel
 pandas
-pytesseract
-pdf2image
-pyzbar
-deep-translator
+openpyxl
+
+# PDF Processing & Generation
 pypdf
+pdf2image
+reportlab
+
+# OCR & Barcode Scanning
+pytesseract
+pyzbar
+
+# Translation & Security
+deep-translator
+cryptography
+requests
