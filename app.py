@@ -1,7 +1,7 @@
 import streamlit as st
 import pytesseract
 import pypdf
-import re
+import re 
 import io
 import requests
 import pandas as pd
