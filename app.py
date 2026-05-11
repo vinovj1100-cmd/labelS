@@ -45,9 +45,12 @@ def hash_password(password):
 
 def check_password():
     """Simple password checking with failure tracking"""
+    # Initialize session state keys independently
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
+    if "failed_attempts" not in st.session_state:
         st.session_state.failed_attempts = 0
+    if "lockout_time" not in st.session_state:
         st.session_state.lockout_time = None
 
     # Check for lockout
@@ -79,6 +82,7 @@ def check_password():
                     st.session_state.lockout_time = datetime.now() + pd.Timedelta(minutes=10)
                     st.error("🔒 Too many failed attempts. System locked for 10 minutes.")
                 return False
+        return True
     return True
 
 def encrypt_data(data):
@@ -654,4 +658,4 @@ if check_password():
                     data=settings_json,
                     file_name=f"ozon_settings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                     mime="application/json"
-                )                    
+                )
