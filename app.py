@@ -9,7 +9,6 @@ import json
 import os
 from datetime import datetime
 import hashlib
-import hmac
 from pdf2image import convert_from_bytes
 from pyzbar.pyzbar import decode
 from deep_translator import GoogleTranslator
@@ -21,37 +20,17 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ------------------ CONFIG CONSTANTS ------------------
-# Canonical export format options (used across UI)
-EXPORT_FORMAT_OPTIONS = ["CSV", "Excel", "JSON", "PDF Report"]
-
-# ------------------ 1. ENHANCED SECURITY CONFIGURATION ------------------
-# Require persistent encryption key from environment (fail-fast)
-ENCRYPTION_KEY_ENV = os.getenv('OZON_ENCRYPTION_KEY')
-if not ENCRYPTION_KEY_ENV:
-    # Fail fast in case the operator hasn't provided an encryption key.
-    # This prevents accidental use of ephemeral keys that cannot be recovered across restarts.
-    raise RuntimeError("Missing OZON_ENCRYPTION_KEY environment variable. Please set it from your secrets manager.")
-# Ensure bytes
-ENCRYPTION_KEY = ENCRYPTION_KEY_ENV.encode() if isinstance(ENCRYPTION_KEY_ENV, str) else ENCRYPTION_KEY_ENV
+# --- 1. ENHANCED SECURITY CONFIGURATION ---
+# Generate encryption key on first run
+ENCRYPTION_KEY = os.getenv('OZON_ENCRYPTION_KEY', Fernet.generate_key())
 cipher_suite = Fernet(ENCRYPTION_KEY)
 
-# Authentication: use hashed password from environment rather than a hardcoded string
-APP_PASSWORD_HASH = os.getenv("OZON_APP_PASSWORD_HASH")  # set to hex sha256 of password
+# Change this password to your preferred login
+APP_PASSWORD = "VINOVJ1100"
 
 def hash_password(password):
     """Hash password for additional security"""
     return hashlib.sha256(password.encode()).hexdigest()
-
-def is_password_correct(password: str) -> bool:
-    """Constant-time compare of provided password hash against environment hash.
-
-    Returns False if APP_PASSWORD_HASH is not configured.
-    """
-    if not APP_PASSWORD_HASH:
-        logger.error("OZON_APP_PASSWORD_HASH not set in environment. Authentication disabled.")
-        return False
-    return hmac.compare_digest(hash_password(password), APP_PASSWORD_HASH)
 
 def check_password():
     """Enhanced password checking with failure tracking"""
@@ -76,19 +55,14 @@ def check_password():
         
         pwd_input = st.text_input("Enter Password", type="password")
         if st.button("Unlock System"):
-            # Use environment-backed password hash for verification
-            if not APP_PASSWORD_HASH:
-                st.error("❌ Authentication not configured. Please set OZON_APP_PASSWORD_HASH.")
-                return False
-
-            if is_password_correct(pwd_input):
+            if pwd_input == APP_PASSWORD:
                 st.session_state.authenticated = True
                 st.session_state.failed_attempts = 0
                 st.rerun()
             else:
                 st.session_state.failed_attempts += 1
                 st.error("❌ Incorrect Password. Access Denied.")
-
+                
                 if st.session_state.failed_attempts >= 3:
                     st.session_state.lockout_time = datetime.now() + pd.Timedelta(minutes=10)
                     st.error("🔒 Too many failed attempts. System locked for 10 minutes.")
@@ -103,7 +77,7 @@ def decrypt_data(encrypted_data):
     """Decrypt sensitive data"""
     return cipher_suite.decrypt(encrypted_data.encode()).decode()
 
-# ------------------ 2. PDF PROCESSING IMPLEMENTATION ------------------
+# --- 2. PDF PROCESSING IMPLEMENTATION ---
 def extract_text_from_pdf(pdf_bytes):
     """Extract text from PDF bytes"""
     try:
@@ -207,16 +181,14 @@ def generate_pdf_report(data, filename, operator_name):
         st.error(f"❌ PDF generation failed: {str(e)}")
         return None
 
-# ------------------ 3. DATA EXPORT FUNCTIONALITY ------------------
+# --- 3. DATA EXPORT FUNCTIONALITY ---
 def export_data(data, format_type, operator_name):
     """Export data in specified format"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"ozon_export_{operator_name}_{timestamp}"
 
     try:
-        fmt = (format_type or "").strip().lower()
-
-        if fmt == "csv":
+        if format_type == "CSV":
             if isinstance(data, dict):
                 df = pd.DataFrame.from_dict(data, orient='index')
             else:
@@ -229,7 +201,7 @@ def export_data(data, format_type, operator_name):
                 mime="text/csv"
             )
 
-        elif fmt in ("excel", "xlsx"):
+        elif format_type == "Excel":
             if isinstance(data, dict):
                 with pd.ExcelWriter(f"{filename}.xlsx") as writer:
                     for key, value in data.items():
@@ -251,7 +223,7 @@ def export_data(data, format_type, operator_name):
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-        elif fmt == "json":
+        elif format_type == "JSON":
             json_data = json.dumps(data, indent=2, default=str)
             st.download_button(
                 label=f"Download JSON Report",
@@ -260,7 +232,7 @@ def export_data(data, format_type, operator_name):
                 mime="application/json"
             )
 
-        elif fmt in ("pdf report", "pdf"):
+        elif format_type == "PDF Report":
             pdf_content = generate_pdf_report(data, filename, operator_name)
             if pdf_content:
                 st.download_button(
@@ -316,7 +288,7 @@ def clear_session_data():
     for key in keys_to_clear:
         del st.session_state[key]
 
-# ------------------ 4. MAIN APPLICATION ------------------
+# --- 4. MAIN APPLICATION ---
 # ==================== AUTHENTICATION INITIALIZATION ====================
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
@@ -357,8 +329,7 @@ if check_password():
         
         st.divider()
         st.subheader("💾 Export Settings")
-        # Use canonical export options
-        default_export_format = st.selectbox("Default Export Format", EXPORT_FORMAT_OPTIONS, index=0)
+        export_format = st.selectbox("Default Export Format", ["csv", "excel", "json"])
         
         st.divider()
         st.subheader("🔒 Security")
@@ -520,7 +491,7 @@ if check_password():
                             json.dump(audit_log, f, indent=2)
                         st.success(f"📋 Audit log saved: {log_filename}")
             else:
-                st.warning("**Paste data to begin audit.")
+                st.warning("**Paste data to begin audit.**")
 
     # --- TAB 4: TRANSLATOR ---
     with tabs[3]:
@@ -588,7 +559,7 @@ if check_password():
         st.subheader("📋 **Data Export & Management**")
 
         # Export format selection
-        export_format = st.selectbox("Select Export Format", EXPORT_FORMAT_OPTIONS)
+        export_format = st.selectbox("Select Export Format", ["CSV", "Excel", "JSON", "PDF Report"])
 
         # Data source selection
         data_source = st.selectbox("Select Data to Export", 
@@ -649,7 +620,7 @@ if check_password():
                     'api_key': ozon_key.replace('*', 'X') if ozon_key else ''
                 },
                 'scanner_settings': {'dpi': scan_dpi},
-                'export_settings': {'default_format': default_export_format}
+                'export_settings': {'default_format': export_format}
             }
 
             st.json(settings)
