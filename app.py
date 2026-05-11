@@ -295,6 +295,21 @@ def calculate_statistics(session_state):
     }
     return stats
 
+# Utility: mask secrets but keep last `keep` characters
+def mask_secret(value, keep=4, mask_char='*'):
+    """Return a masked version of value keeping the last `keep` characters.
+
+    Examples:
+      mask_secret('abcd1234', keep=4) -> '****1234'
+      mask_secret('abc', keep=4) -> '***'
+    """
+    if not value:
+        return ''
+    s = str(value)
+    if len(s) <= keep:
+        return mask_char * len(s)
+    return mask_char * (len(s) - keep) + s[-keep:]
+
 def clear_session_data():
     """Clear all session data"""
     keys_to_clear = [k for k in st.session_state.keys()
@@ -638,11 +653,11 @@ if check_password():
                 'export_settings': {'default_format': default_export_format}
             }
 
-            # Create a redacted copy to avoid leaking credentials
+            # Create a redacted copy to avoid leaking credentials (partial-mask: keep last 4 chars)
             redacted_settings = dict(settings)
             redacted_settings['api_credentials'] = {
-                'client_id': "REDACTED" if ozon_id else '',
-                'api_key': "REDACTED" if ozon_key else ''
+                'client_id': mask_secret(ozon_id, keep=4) if ozon_id else '',
+                'api_key':  mask_secret(ozon_key, keep=4) if ozon_key else ''
             }
 
             st.json(redacted_settings)
