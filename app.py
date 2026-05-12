@@ -257,6 +257,30 @@ def clear_session_data():
     for key in keys_to_clear:
         del st.session_state[key]
 
+def standardize_title(raw_text):
+    """Formats translated text to match the 'Green Column' standard"""
+    text = raw_text.upper()
+    
+    # Remove unnecessary prefixes
+    text = text.replace("SMARTPHONE ", "")
+    text = text.replace("MOBILE PHONE ", "")
+    
+    # Custom Brand & Color Mappings based on e-commerce standards
+    mappings = {
+        "IPHONE": "APPLE IPHONE",
+        " ORANGE": " COSMIC ORANGE",
+        " BLUE": " DEEP BLUE",
+        " GRAY": " TITAN GRAY",
+        " GREY": " TITAN GRAY",
+        " PURPLE": " SANDY PURPLE"
+    }
+    
+    for key, value in mappings.items():
+        if key in text and value not in text:
+            text = text.replace(key, value)
+            
+    return text.strip()
+
 # ------------------ 4. MAIN APPLICATION ------------------
 # ==================== SESSION INITIALIZATION ====================
 
@@ -306,7 +330,8 @@ st.title(f"📦 Ozon Master Tool Pro | **{operator_name}**")
 if 'session_hash' not in st.session_state or not st.session_state.session_hash:
     st.session_state.session_hash = hashlib.sha256(os.urandom(16)).hexdigest()[:16]
 
-tabs = st.tabs(["📊 Status", "🔍 PDF Sort", "⚖️ Auditor", "🌐 Translator", "📋 Export"])
+# Added the new "Bulk Convert" tab
+tabs = st.tabs(["📊 Status", "🔍 PDF Sort", "⚖️ Auditor", "🌐 Translator", "🔄 Bulk Convert", "📋 Export"])
 
 # --- TAB 1: STATUS ---
 with tabs[0]:
@@ -356,7 +381,6 @@ with tabs[1]:
             use_ocr = st.checkbox("Enable OCR Fallback", value=True, help="Use Tesseract OCR if barcode decoding fails.")
 
     if st.button("🚀 Scan, Sort & Generate PDF", type="primary", use_container_width=True):
-        # Clean up target IDs from the text area
         target_ids = [tid.strip() for tid in sort_list.split('\n') if tid.strip()]
         
         if not target_ids:
@@ -366,45 +390,33 @@ with tabs[1]:
         else:
             with st.spinner("Mapping PDF pages and re-ordering... This may take a moment."):
                 try:
-                    # Initialize PDF objects
                     pdf_reader = pypdf.PdfReader(io.BytesIO(label_file.getvalue()))
                     pdf_writer = pypdf.PdfWriter()
-                    
-                    # Convert PDF to images for scanning
                     images = convert_from_bytes(label_file.getvalue(), dpi=scan_dpi)
                     
                     id_to_page_map = {}
                     progress_bar = st.progress(0, text="Scanning pages...")
                     
-                    # Scan each page
                     for i, img in enumerate(images):
                         page_codes = []
-                        
-                        # 1. Try Barcode Decode
                         barcodes = decode(img)
                         for b in barcodes:
                             decoded_data = b.data.decode("utf-8")
                             page_codes.extend(SCANNING_ID_REGEX.findall(decoded_data))
                         
-                        # 2. OCR Fallback (if enabled and no barcodes found)
                         if not barcodes and use_ocr:
                             ocr_text = pytesseract.image_to_string(img)
                             page_codes.extend(SCANNING_ID_REGEX.findall(ocr_text))
                         
-                        # Map found codes to the original PDF page
-                        for code in set(page_codes): # Use set to avoid duplicate mappings per page
+                        for code in set(page_codes):
                             id_to_page_map[code] = pdf_reader.pages[i]
                             
-                        # Update progress bar
                         progress_bar.progress((i + 1) / len(images), text=f"Scanned page {i+1} of {len(images)}")
 
-                    # Clear progress bar
                     progress_bar.empty()
 
-                    # Re-build PDF in the sequence of 'target_ids'
                     matched_count = 0
                     for tid in target_ids:
-                        # Extract clean ID in case user pasted extra text alongside the tracking number
                         clean_tid_match = SCANNING_ID_REGEX.search(tid)
                         search_key = clean_tid_match.group() if clean_tid_match else tid
 
@@ -412,7 +424,6 @@ with tabs[1]:
                             pdf_writer.add_page(id_to_page_map[search_key])
                             matched_count += 1
 
-                    # Results Output
                     st.divider()
                     if matched_count == 0:
                         st.error("❌ No matches found. Ensure the Tracking IDs in your list match the barcodes/text in the PDF.")
@@ -420,7 +431,6 @@ with tabs[1]:
                         out_io = io.BytesIO()
                         pdf_writer.write(out_io)
                         
-                        # Display Metrics
                         col_metrics1, col_metrics2, col_metrics3 = st.columns(3)
                         col_metrics1.metric("Requested Sequence", len(target_ids))
                         col_metrics2.metric("Successfully Mapped", matched_count)
@@ -435,7 +445,6 @@ with tabs[1]:
                             use_container_width=True
                         )
                         
-                        # Show Mismatches
                         missing = [tid for tid in target_ids if (SCANNING_ID_REGEX.search(tid).group() if SCANNING_ID_REGEX.search(tid) else tid) not in id_to_page_map]
                         if missing:
                             st.warning(f"⚠️ **Missing from PDF ({len(missing)}):**\n" + "\n".join([f"• {m}" for m in missing]))
@@ -495,7 +504,6 @@ with tabs[2]:
                 df = pd.DataFrame(results)
                 st.session_state.audit_results = results
                 
-                # Highlight rows visually
                 st.dataframe(df.style.apply(
                     lambda x: ['background-color: #ffcccc; font-weight: bold' if str(v).startswith('🔴') else 
                                'background-color: #fff3cd; font-weight: bold' if str(v).startswith('⚠️') else '' 
@@ -518,17 +526,14 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("🌐 **Instant Translator**")
 
-    # Translation options
     source_lang = st.selectbox("Source Language", ["auto", "ru", "en", "de", "fr", "es"])
     target_lang = st.selectbox("Target Language", ["en", "ru", "de", "fr", "es", "pt", "it", "ja", "ko"])
 
-    # Text input with examples
     st.markdown("### Translate Text")
     with st.form("translate_form", clear_on_submit=True):
         txt = st.text_area("Enter Text", height=200, placeholder="Enter text here...")
         submit_btn = st.form_submit_button("Translate")
 
-    translation_results = []
     if submit_btn:
         try:
             translator = GoogleTranslator(source=source_lang, target=target_lang)
@@ -543,9 +548,7 @@ with tabs[3]:
             }
 
             st.session_state.translation_history.append(translation_entry)
-            translation_results.append(translation_entry)
 
-            # Show translation
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("**Original:**")
@@ -554,39 +557,72 @@ with tabs[3]:
                 st.markdown("**Translated:**")
                 st.text(translated_text)
 
-            # Download history
-            if st.button("📥 Download Translation History"):
-                history_df = pd.DataFrame(st.session_state.translation_history)
-                csv = history_df.to_csv(index=False)
-                st.download_button(
-                    label="Download History as CSV",
-                    data=csv,
-                    file_name=f"translation_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv"
-                )
-
         except Exception as e:
             st.error(f"❌ Translation failed: {str(e)}")
 
-    # Recent translations
     if st.session_state.translation_history:
         st.markdown("### 📚 Recent Translations")
-        # Get last 5, and properly shape the dataframe
         recent_df = pd.DataFrame(st.session_state.translation_history[-5:])
         st.dataframe(recent_df, use_container_width=True)
 
-# --- TAB 5: EXPORT ---
+# --- TAB 5: BULK CONVERT (WHITE TO GREEN) ---
 with tabs[4]:
+    st.subheader("🔄 **Bulk Title Converter (White to Green)**")
+    st.markdown("Paste your original list (White Column) below. The tool will translate and standardize the text into e-commerce formats (Green Column).")
+
+    col_w, col_g = st.columns(2)
+    
+    with col_w:
+        white_col_input = st.text_area("📄 Input (White Column)", height=400, placeholder="Paste Original titles here...\nСмартфон iPhone 17 Pro Max 256 ГБ, оранжевый\nPOCO F6 12/512GB BLACK")
+
+    with col_g:
+        # Container to hold the output dynamically
+        output_placeholder = st.empty()
+
+    if st.button("✨ Convert to Green Column", type="primary"):
+        if white_col_input:
+            with st.spinner("Converting and translating lines..."):
+                lines = white_col_input.strip().split('\n')
+                results = []
+                translator = GoogleTranslator(source='auto', target='en')
+
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    try:
+                        # 1. Translate
+                        translated = translator.translate(line)
+                        # 2. Format and map specific terms
+                        final_text = standardize_title(translated)
+                        results.append(final_text)
+                    except Exception as e:
+                        # Fallback to original text if translation fails
+                        results.append(line.upper()) 
+
+                green_text = "\n".join(results)
+                output_placeholder.text_area("✅ Output (Green Column)", value=green_text, height=400)
+
+                # Provide a quick download file of the mapped data
+                df_mapped = pd.DataFrame({"Original (White)": lines, "Standardized (Green)": results})
+                csv_mapped = df_mapped.to_csv(index=False)
+                
+                st.download_button(
+                    label="📥 Download Mapped CSV", 
+                    data=csv_mapped, 
+                    file_name=f"white_to_green_conversion_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", 
+                    mime="text/csv"
+                )
+        else:
+            st.warning("Please paste data into the Input box first.")
+
+# --- TAB 6: EXPORT ---
+with tabs[5]:
     st.subheader("📋 **Data Export & Management**")
 
-    # Export format selection
     export_format = st.selectbox("Select Export Format", EXPORT_FORMAT_OPTIONS)
-
-    # Data source selection
     data_source = st.selectbox("Select Data to Export", 
                               ["Audit Results", "Translation History", "All Data"])
 
-    # Export button
     if st.button("📥 Generate & Download Report"):
         if data_source == "Audit Results":
             if "audit_results" not in st.session_state or not st.session_state.audit_results:
@@ -609,7 +645,6 @@ with tabs[4]:
             }
             export_data(combined_data, export_format, operator_name)
 
-    # Data management section
     st.markdown("### 💾 Data Management")
 
     col1, col2 = st.columns(2)
@@ -625,14 +660,12 @@ with tabs[4]:
         st.text(f"Encryption: AES-256")
         st.text(f"Last Activity: {datetime.now().strftime('%H:%M:%S')}")
 
-    # Clear data options
     with st.expander("🗑️ Clear Data"):
         st.warning("⚠️ This will clear all session data!")
         if st.button("Clear All Session Data"):
             clear_session_data()
             st.success("✅ All session data cleared.")
 
-    # Settings export
     with st.expander("⚙️ Export Settings"):
         settings = {
             'operator_name': operator_name,
@@ -644,7 +677,6 @@ with tabs[4]:
             'export_settings': {'default_format': default_export_format}
         }
 
-        # Create a redacted copy to avoid leaking credentials
         redacted_settings = dict(settings)
         redacted_settings['api_credentials'] = {
             'client_id': "REDACTED" if ozon_id else '',
